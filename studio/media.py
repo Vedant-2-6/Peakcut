@@ -3,6 +3,7 @@ import contextlib
 import json
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -26,7 +27,22 @@ YT_BLOCKED = ("YouTube requires authentication ('Sign in to confirm you’re not
 _BOT_CHECK = re.compile(r"not a bot|confirm you.?re not|sign in to confirm(?! your age)|login_required", re.I)
 
 POT_URL = "http://127.0.0.1:4416/ping"
-POT_SERVER_DIR = Path.home() / "bgutil-ytdlp-pot-provider" / "server"
+
+
+def _find_pot_server_dir() -> Path:
+    candidates = [
+        Path.home() / "bgutil-ytdlp-pot-provider" / "server",
+        config.ROOT / "bgutil-ytdlp-pot-provider" / "server",
+        Path("/app/bgutil-ytdlp-pot-provider/server"),
+        Path("/home/user/bgutil-ytdlp-pot-provider/server"),
+    ]
+    for c in candidates:
+        if (c / "build" / "main.js").is_file():
+            return c
+    return candidates[0]
+
+
+POT_SERVER_DIR = _find_pot_server_dir()
 _pot_checked = False
 
 
@@ -49,12 +65,16 @@ def ensure_pot_server():
     main_js = POT_SERVER_DIR / "build" / "main.js"
     if main_js.is_file():
         try:
+            kwargs = {
+                "cwd": str(POT_SERVER_DIR),
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32" and NO_WINDOW:
+                kwargs["creationflags"] = NO_WINDOW
             subprocess.Popen(
                 ["node", str(main_js), "-p", "4416", "-H", "127.0.0.1"],
-                cwd=str(POT_SERVER_DIR),
-                creationflags=NO_WINDOW,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                **kwargs
             )
             for _ in range(8):
                 time.sleep(0.25)

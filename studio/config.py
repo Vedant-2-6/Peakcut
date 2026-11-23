@@ -143,6 +143,40 @@ for d in (USERS_DIR, MODELS_DIR, TMP_DIR, FONTS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 
+def _restore_env_files():
+    """Restore secrets or cookies passed in environment variables (e.g. on Hugging Face Spaces)."""
+    # 1. YouTube Cookies
+    cookies = env("YOUTUBE_COOKIES") or env("COOKIES_TXT")
+    if cookies:
+        c_path = DATA_DIR / "cookies.txt"
+        if not c_path.exists() or c_path.stat().st_size == 0:
+            c_path.write_text(cookies.strip(), encoding="utf-8")
+
+    # 2. Accounts backup (Google / YouTube OAuth tokens)
+    accs = env("PEAKCUT_ACCOUNTS_JSON") or env("YOUTUBE_ACCOUNTS_JSON")
+    if accs:
+        a_path = DATA_DIR / "accounts.json"
+        if not a_path.exists() or a_path.stat().st_size == 0:
+            a_path.write_text(accs.strip(), encoding="utf-8")
+
+    # 3. Posts backup (Scheduled posts queue)
+    posts = env("PEAKCUT_POSTS_JSON")
+    if posts:
+        p_path = DATA_DIR / "posts.json"
+        if not p_path.exists() or p_path.stat().st_size == 0:
+            p_path.write_text(posts.strip(), encoding="utf-8")
+
+    # 4. Creators backup
+    creators = env("PEAKCUT_CREATORS_JSON")
+    if creators:
+        cr_path = DATA_DIR / "creators.json"
+        if not cr_path.exists() or cr_path.stat().st_size == 0:
+            cr_path.write_text(creators.strip(), encoding="utf-8")
+
+
+_restore_env_files()
+
+
 def user_dir(uid: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_]{6,40}", uid or ""):
         raise ValueError("bad user id")
@@ -150,9 +184,12 @@ def user_dir(uid: str) -> Path:
 
 
 # ---------------------------------------------------------------- the site
-HOST = env("PEAKCUT_HOST", "127.0.0.1")
-PORT = int(env("PEAKCUT_PORT") or "8765")
-PUBLIC_URL = (env("PEAKCUT_PUBLIC_URL") or f"http://127.0.0.1:{PORT}").rstrip("/")   # e.g. https://peakcut.com
+HOST = env("PEAKCUT_HOST", "0.0.0.0" if (env("PORT") or env("SPACE_ID")) else "127.0.0.1")
+PORT = int(env("PORT") or env("PEAKCUT_PORT") or "8765")
+if env("SPACE_HOST") and not env("PEAKCUT_PUBLIC_URL"):
+    PUBLIC_URL = f"https://{env('SPACE_HOST')}"
+else:
+    PUBLIC_URL = (env("PEAKCUT_PUBLIC_URL") or f"http://{'127.0.0.1' if HOST == '127.0.0.1' else 'localhost'}:{PORT}").rstrip("/")
 HTTPS = PUBLIC_URL.startswith("https://")
 SESSION_DAYS = int(env("PEAKCUT_SESSION_DAYS", "30"))
 # Accounts are off by default: PeakCut opens straight into the dashboard, with no sign-in, which is what you want

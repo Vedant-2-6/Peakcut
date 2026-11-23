@@ -3,7 +3,9 @@ secrets
 data
 .claude
 .git
+.venv
+.planning
 tests
 **/__pycache__
 *.bat
-*.md
+*.log
