@@ -199,15 +199,32 @@ def _post(p):
             raise RuntimeError("That kind of account is no longer supported.")
         p.update(status="posted", posted_at=time.time(), remote_id=rid, url=url, error=None)
         creators.log(p["creator"], f"Posted to {acc['name']}: {title}")
-    except Exception as e:  # noqa: BLE001
-        p["tries"] += 1
-        p["error"] = str(e)[-300:]
-        if p["tries"] < 3 and clip and acc:
-            p.update(status="scheduled", due_at=time.time() + 600)  # try again in 10 minutes
+    except (accounts.UploadLimitExceeded, Exception) as e:  # noqa: BLE001
+        err_str = str(e)
+        if isinstance(e, accounts.UploadLimitExceeded) or "uploadLimitExceeded" in err_str or "exceeded the number of videos" in err_str:
+            # YouTube daily channel limit reached: postpone to tomorrow at 9:00 AM instead of failing
+            lt = time.localtime(time.time() + 86400)
+            tomorrow_slot = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 9, 0, 0, 0, 0, -1))
+            friendly_msg = "YouTube daily upload limit reached for this channel. Remaining clips are queued for tomorrow."
+            p.update(status="scheduled", due_at=tomorrow_slot, error=friendly_msg, tries=0)
+            creators.log(p["creator"], f"YouTube daily upload limit reached on {acc['name'] if acc else 'YouTube'}. Clip rescheduled for tomorrow at 9:00 AM.")
+            alerts.notify(f"YouTube daily upload limit reached on {acc['name'] if acc else 'YouTube'}. Remaining clips queued for tomorrow.", kind="post")
+            with _lock:
+                offset = 0
+                for p_other in _posts:
+                    if p_other.get("account") == p["account"] and p_other.get("status") in ("scheduled", "failed") and p_other["id"] != p["id"]:
+                        offset += 1800
+                        p_other.update(status="scheduled", due_at=tomorrow_slot + offset, error=friendly_msg, tries=0)
+                        _mirror(p_other)
         else:
-            p["status"] = "failed"
-            creators.log(p["creator"], f"Post failed on {p['account_name']}: {p['error']}")
-            alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
+            p["tries"] += 1
+            p["error"] = err_str[-300:]
+            if p["tries"] < 3 and clip and acc:
+                p.update(status="scheduled", due_at=time.time() + 600)  # try again in 10 minutes
+            else:
+                p["status"] = "failed"
+                creators.log(p["creator"], f"Post failed on {p['account_name']}: {p['error']}")
+                alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
     _save()
     _mirror(p)
     if p.get("status") == "posted":

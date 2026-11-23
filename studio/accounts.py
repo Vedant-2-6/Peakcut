@@ -295,9 +295,23 @@ def remove(aid):
         _write("accounts.json", [a for a in _all() if a["id"] != aid])
 
 
+class UploadLimitExceeded(RuntimeError):
+    pass
+
+
 def _check(r, what):
     if r.status_code >= 400:
-        raise RuntimeError(f"{what} failed ({r.status_code}): {r.text[:300]}")
+        txt = r.text
+        if "uploadLimitExceeded" in txt or "exceeded the number of videos" in txt:
+            raise UploadLimitExceeded(
+                "YouTube daily upload limit reached for this channel. YouTube caps standard/new channels "
+                "at ~10-12 videos per day. To increase this, enable Advanced Features in YouTube Studio (Settings > Channel > Feature Eligibility)."
+            )
+        if "quotaExceeded" in txt:
+            raise UploadLimitExceeded(
+                "Google Cloud API daily quota exceeded (10,000 units/day default limit). Uploads will resume when quota resets."
+            )
+        raise RuntimeError(f"{what} failed ({r.status_code}): {txt[:300]}")
     return r
 
 
