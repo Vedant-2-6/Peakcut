@@ -155,9 +155,10 @@ def _restore_env_files():
     # 2. Accounts backup (Google / YouTube OAuth tokens)
     accs = env("PEAKCUT_ACCOUNTS_JSON") or env("YOUTUBE_ACCOUNTS_JSON")
     if accs:
-        a_path = DATA_DIR / "accounts.json"
-        if not a_path.exists() or a_path.stat().st_size == 0:
-            a_path.write_text(accs.strip(), encoding="utf-8")
+        for a_path in [DATA_DIR / "accounts.json", USERS_DIR / "u_local" / "accounts" / "accounts.json"]:
+            a_path.parent.mkdir(parents=True, exist_ok=True)
+            if not a_path.exists() or a_path.stat().st_size == 0:
+                a_path.write_text(accs.strip(), encoding="utf-8")
 
     # 3. Posts backup (Scheduled posts queue)
     posts = env("PEAKCUT_POSTS_JSON")
