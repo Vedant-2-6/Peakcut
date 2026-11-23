@@ -202,12 +202,13 @@ def _post(p):
     except (accounts.UploadLimitExceeded, Exception) as e:  # noqa: BLE001
         err_str = str(e)
         if isinstance(e, accounts.UploadLimitExceeded) or "uploadLimitExceeded" in err_str or "exceeded the number of videos" in err_str:
-            # YouTube daily channel limit reached: postpone to tomorrow at 9:00 AM instead of failing
-            lt = time.localtime(time.time() + 86400)
-            tomorrow_slot = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 9, 0, 0, 0, 0, -1))
+            # YouTube daily channel limit reached: postpone to next morning at 9:00 AM instead of failing
+            now = time.localtime()
+            target_day = now if now.tm_hour < 9 else time.localtime(time.time() + 86400)
+            tomorrow_slot = time.mktime((target_day.tm_year, target_day.tm_mon, target_day.tm_mday, 9, 0, 0, 0, 0, -1))
             friendly_msg = "YouTube daily upload limit reached for this channel. Remaining clips are queued for tomorrow."
             p.update(status="scheduled", due_at=tomorrow_slot, error=friendly_msg, tries=0)
-            creators.log(p["creator"], f"YouTube daily upload limit reached on {acc['name'] if acc else 'YouTube'}. Clip rescheduled for tomorrow at 9:00 AM.")
+            creators.log(p["creator"], f"YouTube daily upload limit reached on {acc['name'] if acc else 'YouTube'}. Clip rescheduled for 9:00 AM.")
             alerts.notify(f"YouTube daily upload limit reached on {acc['name'] if acc else 'YouTube'}. Remaining clips queued for tomorrow.", kind="post")
             with _lock:
                 offset = 0
