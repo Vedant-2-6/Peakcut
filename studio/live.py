@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, transcribe, usage
+from . import alerts, auth, brain, config, creators, ctx, facecam, games, jobs, load, media, peak_detector, transcribe, usage, yt_chat
 
 # ":username!user@host PRIVMSG #channel :the message"
 _NICK = re.compile(r"(?m)^:([A-Za-z0-9_]{2,25})!")
@@ -47,6 +47,15 @@ def media_safe(e) -> str:
     return safe.friendly(e, 300)
 
 
+def _clean_err(e, max_len: int = 100) -> str:
+    msg = str(e).strip()
+    if msg.startswith("The AI did not answer: "):
+        msg = msg[len("The AI did not answer: "):]
+    if len(msg) > max_len:
+        return msg[:max_len - 3] + "..."
+    return msg
+
+
 def normalize(url: str) -> str:
     url = url.strip()
     if not re.match(r"^https?://", url):
@@ -64,18 +73,16 @@ class _Quiet:
 
 def resolve(url: str) -> dict:
     """Ask yt-dlp for the stream's playable address. Raises NotLive if the channel is offline."""
-    import yt_dlp
-    opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "logger": _Quiet(),
-            "format": "b[height<=720]/bv*[height<=720]+ba/b"}
-    if media.is_youtube(url) and media.youtube_paused():
+    if media.is_youtube(url) and media.youtube_paused(url):
         raise NotLive(media.YT_BLOCKED)
+    opts = {"format": "b[height<=720]/bv*[height<=720]+ba/b", "extract_flat": False}
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with media._ydl(opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception as e:  # noqa: BLE001
         if media.note_refusal(url, e):
             raise NotLive(media.YT_BLOCKED) from e
-        raise NotLive(str(e)[-200:]) from e
+        raise NotLive(_clean_err(e, 200)) from e
     if not info or not info.get("is_live"):
         raise NotLive("This channel is not live right now.")
     fmts = info.get("requested_formats") or [info]
@@ -153,6 +160,9 @@ class Session:
         self.last_spike = -999.0      # when the last jump was sent to the AI (stream seconds)
         self.base = {}                # running averages the jumps are measured against, shown on the card
         self.spikes = 0
+        self.peak_detector = peak_detector.MedianPeakDetector(pre_roll_sec=20.0, min_clip_sec=30.0, max_clip_sec=60.0)
+        self.yt_chat_reader = None
+        self.viewers = 0
         self.game = ""                # which game this stream is, when it can be told
         self.facecam_box = None       # where the webcam is, found once the first clip is made
         self.facecam_checked = False  # the look is made once, even when it finds nothing
@@ -172,7 +182,7 @@ class Session:
             try:
                 self._ai_check(window, why)
             except Exception as e:  # noqa: BLE001
-                self.job["ai"]["last_error"] = str(e)[-200:]
+                self.job["ai"]["last_error"] = _clean_err(e, 200)
             finally:
                 self.ai_busy = 0.0
         self.ai_busy = now
@@ -219,6 +229,28 @@ class Session:
         m = re.match(r"^https?://(?:www\.)?twitch\.tv/([A-Za-z0-9_]+)", self.job["source"]["url"])
         if m:
             threading.Thread(target=ctx.bind(self._chat), args=(m.group(1).lower(),), daemon=True).start()
+        elif media.is_youtube(self.job["source"]["url"]):
+            self.yt_chat_reader = yt_chat.YouTubeChatReader(
+                self.job["source"]["url"],
+                on_message=self._on_yt_message,
+                on_viewers=self._on_yt_viewers,
+                get_stream_time=lambda: int(self.samples / SR)
+            )
+            self.yt_chat_reader.start()
+
+    def _on_yt_message(self, second, author, text, superchat):
+        with self.lock:
+            self.chat[second] += 1
+            self.chat_total += 1
+            if author:
+                self.chat_users.setdefault(second, set()).add(author.lower())
+                self.chat_kept = _trim_names(self.chat_users, second, self.chat_kept)
+        self.peak_detector.record_message(second, author)
+
+    def _on_yt_viewers(self, count):
+        second = int(self.samples / SR)
+        self.viewers = count
+        self.peak_detector.record_viewers(second, count)
 
     def stop(self, note="Stopped by you"):
         """Instant for the user: the card and the creator show as stopped straight away. Clips already being made
@@ -226,6 +258,8 @@ class Session:
         self.end_note = note
         self.user_stopped = True
         self.stop_flag.set()
+        if self.yt_chat_reader:
+            self.yt_chat_reader.stop()
         with self.lock:
             self.job.update(status="done", stage=note)
         jobs.save(self.job)
@@ -439,6 +473,26 @@ class Session:
         self.base = {"loud_db": round(20 * np.log10(max(base, 1e-6)), 1), "loud_now": round(loud_jump * 100),
                      "chat": round(chat_base, 2) if chat_base is not None else None,
                      "chat_now": round(chat_now, 2) if chat_now is not None else None, "pct": round(pct * 100)}
+
+        # Real-time median peak detection and autonomous dynamic clipping (30s-60s)
+        peak = self.peak_detector.check_peak(n)
+        if peak:
+            self.manual.append({
+                "start": peak["start"],
+                "end": peak["end"],
+                "why": peak["reason"]
+            })
+            self.spikes += 1
+
+        stats = self.peak_detector.stats_at(n)
+        self.base.update({
+            "median_rate": stats["median_rate"],
+            "viewers": self.viewers or stats.get("viewers"),
+            "peaks_found": self.peak_detector.total_peaks
+        })
+        if stats["current_rate"] > 0:
+            self.base["chat_now"] = stats["current_rate"]
+
         if why and not self.spike and n - self.last_spike >= self.AUTO_GAP:
             self.spike = {"t": float(n - 3), "why": ", ".join(why)}
             self.last_spike = n
@@ -473,8 +527,8 @@ class Session:
                                                 n=1 if every <= 2 else 2, must=must, game=self._game(),
                                                 timeout=config.LIVE_AI_TIMEOUT)  # Auto (0) asks for one
         except Exception as e:  # noqa: BLE001
-            self.job["ai"]["last_error"] = str(e)[-200:]
-            return self._verdict(verdict, "AI error: " + str(e)[-80:])
+            self.job["ai"]["last_error"] = _clean_err(e, 200)
+            return self._verdict(verdict, "AI error: " + _clean_err(e, 85))
         self.checks += 1
         self.tokens += tok
         keep = [c for c in cands if c["score"] >= (40 if must else st["min_score"])]
@@ -482,7 +536,9 @@ class Session:
         if not keep:
             return self._verdict(verdict, "Words judge: nothing clip-worthy")
         z = brain.loud_zscore(np.array(self.db, dtype=np.float32))
-        lo, hi = int(ws), int(now) + 1
+        lo, hi = max(0, int(ws)), max(0, int(now) + 1)
+        if hi <= lo:
+            hi = lo + 1
         people = self.chat_people()
         if people:
             chat = [len(people.get(t, ())) for t in range(lo, hi)]
@@ -503,7 +559,8 @@ class Session:
             rs = max((m["score"] for m in match), default=0)
             verdict["reaction"] = rs
             both = bool(match)
-            ok = both or (st["decide_mode"] == "either" and c["score"] >= 90) or (must and added == 0)
+            word_ok = (c["score"] >= st["min_score"]) if st.get("decide_mode") == "either" else (c["score"] >= max(80, st["min_score"]))
+            ok = both or word_ok or (must and added == 0)
             if not ok:
                 self.rejected += 1
                 self._verdict(verdict, "Reaction judge said no, not clipped")
@@ -511,8 +568,7 @@ class Session:
             if any(abs(c["start"] - k["start"]) < st["min_gap_min"] * 60 for k in self.job["clips"]):
                 self._verdict(verdict, "Too close to the last clip")
                 continue
-            why = "Both judges agreed" if both else ("Words judge was very sure" if c["score"] >= 90 and
-                                                     st["decide_mode"] == "either" else "Forced: no clip for a while")
+            why = "Both judges agreed" if both else ("Words judge approved" if word_ok else "Forced: no clip for a while")
             c["judges"] = {"words": c["score"], "reaction": rs or None, "why": why}
             c["reason"] = f"{c['reason']} ({why.lower()}.)"
             self._add_clip(c)
@@ -560,7 +616,7 @@ class Session:
                                    timeout=config.LIVE_AI_TIMEOUT)
             except Exception as e:  # noqa: BLE001
                 # Someone asked for this clip by hand. A slow or broken AI costs it its hook, not the clip.
-                self.job["ai"]["last_error"] = str(e)[-200:]
+                self.job["ai"]["last_error"] = _clean_err(e, 200)
                 c = {"score": 0, "category": "other", "hook": "", "title": self.job["title"],
                      "description": "", "hashtags": [], "highlight_words": []}
             self.manual.remove(req)
@@ -580,7 +636,8 @@ class Session:
 
     def _render(self, clip):
         """Runs on the render worker: copy the needed buffer pieces, then make the clip."""
-        deadline = time.time() + 45
+        wait_needed = max(60, int(clip["end"] - (self.samples / SR)) + 35)
+        deadline = time.time() + wait_needed
         while time.time() < deadline:
             self._scan_segments()
             if self.ended or (self.segments and self.segments[-1][2] >= clip["end"] + 1):
@@ -660,11 +717,15 @@ class Session:
         lines = brain.make_lines([w for w in self.words if w["s"] >= self.t_done - 45])[-5:]
         with self.lock:
             sec = int(elapsed)
+            chat_active = bool(self.chat_on or self.chat_total or (self.yt_chat_reader and self.yt_chat_reader.is_connected))
             self.job.update(
                 duration=elapsed,
                 live={"elapsed": round(elapsed), "buffer_sec": round(self.segments[-1][2] - self.segments[0][1]) if self.segments else 0,
                       "lines": [l["text"] for l in lines], "level": [round(x) for x in self.db[-60:]],
-                      "chat": [self.chat.get(t, 0) for t in range(max(0, sec - 60), sec)] if self.chat_on or self.chat_total else None,
+                      "chat": [self.chat.get(t, 0) for t in range(max(0, sec - 60), sec)] if chat_active else None,
+                      "median_rate": self.base.get("median_rate", 0.0),
+                      "viewers": self.base.get("viewers", 0),
+                      "peaks_found": self.base.get("peaks_found", 0),
                       "checks": self.checks, "skipped": self.skipped, "tokens": self.tokens, "words": len(self.words),
                       "rejected": self.rejected, "verdicts": list(reversed(self.verdicts)),
                       "every_min": int(self.settings.get("ai_every_min", 3)) or 3,
@@ -705,7 +766,7 @@ class Session:
                     self._ask_ai()
                 self._publish()
             except Exception as e:  # noqa: BLE001
-                self.job["ai"]["last_error"] = str(e)[-200:]
+                self.job["ai"]["last_error"] = _clean_err(e, 200)
             # Leaving here must not happen while an AI check is still running: it may still be adding a
             # clip, and cleanup() deletes the buffer that clip is cut from. That is true after a stop as
             # well as at the end of a stream, so both wait for it. Stopping is still instant on the page:
@@ -784,7 +845,7 @@ def start_session(creator: dict, url=None) -> dict:
         raise ValueError("This creator is already being recorded.")
     if not media.site_allowed(url):
         raise ValueError("Channel links must be from YouTube, Twitch or Kick.")
-    if media.is_youtube(url) and media.youtube_paused():
+    if media.is_youtube(url) and media.youtube_paused(url):
         raise ValueError(media.YT_BLOCKED.replace("download videos", "record YouTube streams")
                          .replace("Upload the video file instead, or use a Twitch or Kick link. YouTube links",
                                   "Twitch and Kick streams still work. YouTube"))
@@ -848,7 +909,7 @@ def _watch_one(c):
                 continue
             if media.is_youtube(url):
                 # check YouTube will hand over the stream before making a recording that could only fail
-                if media.youtube_paused():
+                if media.youtube_paused(url):
                     continue
                 try:
                     resolve(normalize(url))
@@ -862,7 +923,7 @@ def _watch_one(c):
     except NotLive:
         pass
     except Exception as e:  # noqa: BLE001
-        creators.log(c["id"], f"Auto-record check failed: {str(e)[-150:]}")
+        creators.log(c["id"], f"Auto-record check failed: {_clean_err(e, 150)}")
 
 
 def watch_loop():

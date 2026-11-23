@@ -21,6 +21,11 @@ if _SQLITE:
         cur.execute("PRAGMA journal_mode=WAL")
         cur.execute("PRAGMA synchronous=NORMAL")
         cur.execute("PRAGMA busy_timeout=30000")
+        cur.execute("PRAGMA cache_size=-64000")         # 64 MB RAM page cache
+        cur.execute("PRAGMA temp_store=MEMORY")          # temp tables and sorts in RAM
+        cur.execute("PRAGMA mmap_size=268435456")        # 256 MB memory-mapped I/O
+        cur.execute("PRAGMA journal_size_limit=67108864")  # 64 MB maximum WAL journal size
+        cur.execute("PRAGMA wal_autocheckpoint=1000")    # checkpoint WAL every 1000 pages
         cur.close()
 meta = sa.MetaData()
 

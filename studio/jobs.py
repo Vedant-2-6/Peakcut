@@ -107,7 +107,7 @@ _by_user: dict = {}                       # user -> {job id: job}: listing one p
 _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
-DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
+DEFAULTS = {"max_clips": 6, "min_len": 40, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
             "range_start": None, "range_end": None, "captions": True}
 
 
@@ -381,7 +381,8 @@ def render_one(job, clip, words):
         src = Path(clip["src"]) if clip.get("src") else Path(job["source_path"])
         if not clip.get("src"):
             clip["end"] = min(clip["end"], job["duration"])
-        local = dict(clip, start=clip["start"] - off, end=clip["end"] - off, hook=roman.to_roman(clip.get("hook") or ""))
+        local = dict(clip, start=clip["start"] - off, end=clip["end"] - off,
+                     hook=roman.to_roman(clip.get("hook") or ""), uploader=job.get("uploader", ""))
         near = _caption_words(job, clip, words, off) if clip.get("captions", True) else []
         out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
@@ -584,8 +585,19 @@ def _run_job(job):
         if ((o["range_end"] or meta["duration"]) - (o["range_start"] or 0)) > config.MAX_VIDEO_HOURS * 3600:
             raise RuntimeError(f"That is longer than {config.MAX_VIDEO_HOURS:g} hours. Choose a shorter part of it under Options.")
         if meta["is_live"]:
-            raise RuntimeError("This link is a live stream, so it would never finish downloading. Open the creator, "
-                               "put this link under Setup, and press Start recording instead.")
+            from . import live
+            cid = job.get("creator")
+            c = creators.get(cid) if cid else None
+            if not c:
+                name = meta.get("uploader") or "Live Stream"
+                existing = next((x for x in creators.all_creators() if x["name"].lower() == name.lower()), None)
+                c = existing or creators.create({"name": name, "channel": src["url"]})
+            try:
+                live.start_session(c, src["url"])
+            except ValueError:
+                pass
+            _set(job, status="done", stage="Live Monitoring Agent active", title=meta.get("title") or job.get("title"), uploader=meta.get("uploader") or job.get("uploader"))
+            return
         _set(job, title=meta["title"], uploader=meta["uploader"], duration=meta["duration"])
         if not job.get("thumb") and media.save_thumb(d, url=src["url"]):
             _set(job, thumb=True)
@@ -626,11 +638,11 @@ def _run_job(job):
                 try:
                     path = video.result()
                 except Exception as e:  # noqa: BLE001 - sites sometimes refuse a download
-                    notes.append(f"Video download refused once ({str(e)[-80:]}), retrying")
+                    notes.append(f"Video download refused once ({str(e).strip()[:80]}), retrying")
                     try:
                         path = media.download(src["url"], d, int(o["quality"]))
                     except Exception as e2:  # noqa: BLE001
-                        notes.append(f"Whole-video download failed ({str(e2)[-80:]}), fetching clip parts instead")
+                        notes.append(f"Whole-video download failed ({str(e2).strip()[:80]}), fetching clip parts instead")
                 if path:
                     info = media.probe(path)
                     job.update(source_path=str(path), width=info["width"], height=info["height"])

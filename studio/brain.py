@@ -143,7 +143,11 @@ def _tidy(c, s, e, game=None):
 def _same_word(old, new):
     """A caption fix may respell a word or turn it into digits. It may not swap in different words."""
     a, b = re.sub(r"[^a-z0-9]", "", old.lower()), re.sub(r"[^a-z0-9]", "", new.lower())
-    return (not b) or (any(ch.isdigit() for ch in b) and len(new) <= 12) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.45
+    if (not b) or (any(ch.isdigit() for ch in b) and len(new) <= 12):
+        return True
+    if difflib.SequenceMatcher(None, a, b).ratio() >= 0.45:
+        return True
+    return roman.is_phonetic_variant(old, new)
 
 
 def _overlaps(s, e, others):
@@ -270,7 +274,7 @@ def _game_rules(game):
     return GAME_RULES.format(game=_safe(games.name_of(game) or str(game), 40), tags=tags)
 
 
-def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=15, max_len=60, log=print, game=None):
+def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=40, max_len=60, log=print, game=None):
     z = loud_zscore(db)
     lines = make_lines(words, z)
     if not lines:
@@ -314,7 +318,7 @@ def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=
     return clips, {"model": used_model, "tokens": tokens, "note": note}
 
 
-def find_live_clips(words, z, now, chat=None, title="", uploader="", min_len=15, max_len=60, existing=(), game=None):
+def find_live_clips(words, z, now, chat=None, title="", uploader="", min_len=40, max_len=60, existing=(), game=None):
     """One live check over the recent transcript. Returns (clips, tokens_used)."""
     lines = make_lines(words, z, chat)
     if len(lines) < 3:
@@ -431,7 +435,7 @@ SIG_SCHEMA = {
 }
 
 
-def judge_transcript(words, start, now, title="", uploader="", min_len=15, max_len=60, existing=(), n=2, must=False,
+def judge_transcript(words, start, now, title="", uploader="", min_len=40, max_len=60, existing=(), n=2, must=False,
                     game=None, timeout=None):
     """Judge 1: words only. Returns (clips, tokens)."""
     lines = make_lines(words)
@@ -479,7 +483,7 @@ def judge_signals(z, chat, start, now, unit="messages", timeout=None):
 
 FIX_SCHEMA = {"type": "ARRAY", "items": {"type": "STRING"}}
 # Languages whose captions keep the words that were said: English as it is, Hindi and Urdu in Roman letters.
-KEEP_LANGS = ("en", "hi", "ur")
+KEEP_LANGS = ("en", "hi", "ur", "hinglish")
 
 
 def needs_translation(lang: str) -> bool:
@@ -556,13 +560,23 @@ def _fix_caption_words(words: list, title: str = "", lang: str = "") -> list:
     """
     if len(words) < 3:
         return words
-    # The Hindi and Urdu rule is only given for those videos. On an English video it is one more thing a small
-    # model can get wrong (turning English into something else).
-    hindi = (lang or "").lower().startswith(("hi", "ur")) or any(roman.needs_roman(w["w"]) for w in words)
-    hinglish = ("If a word is Hindi or Urdu (in Devanagari or Urdu script, or already "
-                "in Roman letters), write that same word in Roman letters the way people type Hindi in chats (Hinglish): "
-                "'चूना' -> 'choona', 'जो' -> 'jo', 'उसको' -> 'usko', 'یار' -> 'yaar', 'کیا' -> 'kya'. Never translate it into "
-                "English and never leave Devanagari or Urdu script. ") if hindi else ""
+    # The Hindi and Urdu / Hinglish rule is given for those videos or when code-switching is detected.
+    # On a purely English video it is omitted so small models do not turn English into something else.
+    hindi = (lang or "").lower().startswith(("hi", "ur", "hinglish")) or any(roman.needs_roman(w["w"]) for w in words)
+    is_hinglish = hindi or roman.is_hinglish(words, title)
+    if is_hinglish:
+        hinglish = (
+            "The speaker may use Indian English, Hindi, or code-switched Hinglish (Hindi mixed into English as spoken by creators and streamers). "
+            "If a word is Hindi or Urdu (in Devanagari or Urdu script, or spelled in Roman letters), write that same word in Roman letters the way people type Hindi in chats ('Hinglish'): "
+            "'चूना' -> 'choona', 'जो' -> 'jo', 'usko', 'yaar', 'kya', 'bhai', 'arre', 'nahi', 'matlab', 'accha', 'theek', 'chalo', 'dekho', 'karo', 'jaldi'. "
+            "Fix obvious speech-recognition mishearings of Hindi/Hinglish words (e.g. 'array' -> 'arre', 'bye'/'by'/'pie' -> 'bhai' when addressing someone, "
+            "'year' -> 'yaar', 'deck' -> 'dekh', 'mud love' -> 'matlab', 'take'/'thick' -> 'theek', 'night'/'nay' -> 'nahi', 'car' -> 'kar', 'shallow' -> 'chalo'). "
+            "Keep spoken English words in English (e.g. 'revive', 'rush', 'clutch', 'cover', 'nice', 'gameplay'). "
+            "Never translate Hindi/Hinglish into English (do not change 'bhai' to 'brother' or 'kya' to 'what'). "
+            "Never leave Devanagari or Urdu script in the output; always use Roman letters. "
+        )
+    else:
+        hinglish = ""
     numbered = "\n".join(f"{i}: {_safe(w['w'], 60)}" for i, w in enumerate(words))
     prompt = (
         "These are the words of a short video clip's captions, one per line with its number, written by a speech "

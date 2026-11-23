@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from . import admin as admins
 from . import account, load
-from . import (accounts, ai, alerts, auth, config, creators, ctx, db, jobs, live, media, posting,
+from . import (accounts, ai, alerts, auth, autopilot, config, creators, ctx, db, jobs, live, media, posting,
                profiles, render, safe, transcribe, usage)
 
 from . import tools as _tools  # noqa: E402
@@ -577,7 +577,8 @@ def status(request: Request):
     return {"user": auth.public(me_), "update": updates.latest() if me_.is_admin else None, "accounts": config.ACCOUNTS, "disk_full": load.disk_full(), "no_ffmpeg": bool(_tools.missing()), "links": {"repo": config.REPO_URL, "follow": config.FOLLOW_URL}, "ai": usage.brief(), "unread": notices.unread(),
             "tour": not accounts.settings()["tour_done"],
             "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES}, "max_upload_mb": config.MAX_UPLOAD_MB, "upload_part_mb": config.UPLOAD_PART_MB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
-            "styles": {k: v["label"] for k, v in render.STYLES.items()}, "layouts": render.LAYOUTS}
+            "styles": {k: v["label"] for k, v in render.STYLES.items()}, "layouts": render.LAYOUTS,
+            "autopilot": autopilot.state()}
 
 
 # ================================================================ videos
@@ -721,13 +722,27 @@ def create_from_link(body: dict = Body(...)):
     creator = str(body.get("creator") or "") or None
     if creator and not creators.get(creator):
         raise HTTPException(404, "No such creator")
+    seen = media._PREVIEWS.get(url)  # already looked up while the user was typing: show it straight away
+    if seen and seen.get("is_live"):
+        c = creators.get(creator) if creator else None
+        if not c:
+            name = seen.get("uploader") or "Live Stream"
+            existing = next((x for x in creators.all_creators() if x["name"].lower() == name.lower()), None)
+            c = existing or creators.create({"name": name, "channel": url})
+        try:
+            live_job = live.start_session(c, url)
+            return jobs.public(live_job)
+        except ValueError as e:
+            active_sess = live.active_for(c["id"])
+            if active_sess:
+                return jobs.public(active_sess.job)
+            raise HTTPException(400, str(e))
     try:
         with _create_lock:
             _job_slots()
             job = jobs.create({"type": "url", "url": url, "name": url}, body.get("options") or {}, creator=creator)
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e) if isinstance(e, ValueError) else "Those options aren't valid.")
-    seen = media._PREVIEWS.get(url)  # already looked up while the user was typing: show it straight away
     if seen:
         job.update(title=seen["title"], uploader=seen["uploader"], duration=seen["duration"])
         if media.save_thumb(jobs.job_dir(job["id"]), url=url):
@@ -1241,6 +1256,29 @@ def clip_now(jid: str, body: dict = Body(...)):
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
     return {"ok": True}
+
+
+# ================================================================ Autopilot
+@app.post("/api/autopilot/start")
+def autopilot_start(body: dict = Body(None)):
+    duration = int((body or {}).get("duration_min", 60))
+    return autopilot.start(duration_min=duration)
+
+
+@app.post("/api/autopilot/stop")
+def autopilot_stop():
+    return autopilot.stop()
+
+
+@app.get("/api/autopilot/status")
+def autopilot_status():
+    return autopilot.state()
+
+
+@app.post("/api/autopilot/topic")
+def autopilot_set_topic(body: dict = Body(...)):
+    topic = str((body or {}).get("topic", "gta6"))
+    return autopilot.set_topic(topic)
 
 
 # ================================================================ AI usage

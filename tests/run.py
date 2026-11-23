@@ -65,7 +65,11 @@ def main() -> int:
                 ("fresh installs: ffmpeg, the speech model, AI errors", ["tests/test_tools.py"]),
                 ("the storage folder: full drive, open, move", ["tests/test_storage.py"]),
                 ("security: visitor address, email addresses, Google sign-in, prompts", ["tests/test_hardening.py"]),
-                ("long logs, the machine monitor, failed recordings, admin day totals", ["tests/test_robustness.py"])]
+                ("long logs, the machine monitor, failed recordings, admin day totals", ["tests/test_robustness.py"]),
+                ("live chat agent and peak detector", ["tests/test_live_chat_agent.py"]),
+                ("hinglish and code-switched captions", ["tests/test_hinglish_captions.py"]),
+                ("autopilot gaming stream discovery and rotation", ["tests/test_autopilot.py"]),
+                ("voiceover hook and pacing engine", ["tests/test_tts_module.py"])]
         for name, args in runs:
             print(f"\n=== {name} ===", flush=True)
             r = subprocess.run([sys.executable, *args], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")

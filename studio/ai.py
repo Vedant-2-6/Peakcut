@@ -196,8 +196,10 @@ def explain(e) -> str:
         return f"{label()} refused the key. Paste a working key under Settings, AI."
     if "429" in text or "quota" in low or "rate limit" in low or "exhausted" in low:
         return f"{label()} says the key has hit its limit or has no credit left. Check the account with {label()}, or try again later."
-    if "connect" in low or "timed out" in low or "timeout" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolutionerror" in low or "name resolution" in low:
-        return f"PeakCut couldn't reach {label()}. Check the internet connection" + (" and that Ollama is running." if provider() == "ollama" else ".")
+    if "timed out" in low or "timeout" in low or "readtimeout" in low:
+        return f"{label()} took too long to answer (request timed out)."
+    if "connect" in low or "getaddrinfo" in low or "refused" in low or "nodename" in low or "servname" in low or "nameresolutionerror" in low or "name resolution" in low:
+        return f"PeakCut couldn't reach {label()}." + (" Check that Ollama is running." if provider() == "ollama" else " Check the internet connection.")
     return ""
 
 
@@ -417,8 +419,11 @@ def _from_events(text: str) -> dict:
 def _openai(model, prompt, schema, timeout=None):
     headers = {"Authorization": f"Bearer {key()}"} if key() else {}
     body = {"model": model, "messages": [{"role": "user", "content": _wrapped(prompt, schema)}], "stream": False}
+    if provider() == "ollama":
+        body["keep_alive"] = "60m"
+        body["options"] = {"num_predict": 512, "temperature": 0.2}
     # Most services accept these two extras; a few models refuse one of them, so they are dropped on a refusal.
-    extras = [{"temperature": 0.4, "response_format": {"type": "json_object"}}, {"response_format": {"type": "json_object"}}, {}]
+    extras = [{"temperature": 0.2, "response_format": {"type": "json_object"}}, {"response_format": {"type": "json_object"}}, {}]
     r = None
     for extra in extras:
         r = httpx.post(f"{base_url()}/chat/completions", json={**body, **extra}, headers=headers, timeout=timeout or 180)

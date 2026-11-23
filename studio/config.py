@@ -136,8 +136,8 @@ SKIP_STATIC = env("PEAKCUT_SKIP_STATIC", "0") == "1"
 STATIC_THRESHOLD = float(env("PEAKCUT_STATIC_THRESHOLD", "0.4"))
 STATIC_MIN_SECONDS = float(env("PEAKCUT_STATIC_MIN_SECONDS", "6"))
 # How long one AI answer may take on a live stream. It is short on purpose: while the AI thinks, the
-# recording carries on, so a slow answer costs a check, not the stream.
-LIVE_AI_TIMEOUT = float(env("PEAKCUT_LIVE_AI_TIMEOUT", "45"))
+# recording carries on, so a slow answer costs a check, not the stream. (90s for local Ollama CPU, 45s for cloud API)
+LIVE_AI_TIMEOUT = float(env("PEAKCUT_LIVE_AI_TIMEOUT", "90" if env("PEAKCUT_AI_PROVIDER", "gemini").lower() == "ollama" else "45"))
 
 for d in (USERS_DIR, MODELS_DIR, TMP_DIR, FONTS_DIR):
     d.mkdir(parents=True, exist_ok=True)

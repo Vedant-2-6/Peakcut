@@ -14,14 +14,56 @@ from . import config
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # ---------------------------------------------------------------- when YouTube refuses this server
-# YouTube sometimes refuses a server's downloads altogether ("sign in to confirm you're not a bot"). It is a
-# refusal of the server, not of one video, so once it happens YouTube links are turned away at once for a few
-# minutes, with a clear message, instead of each one waiting to fail. Then the next link simply tries again.
-YT_PAUSE = 600
+# YouTube sometimes refuses a video/stream download ("sign in to confirm you're not a bot").
+# When this happens, we track refusal per-video with a short cooldown, without globally locking out
+# all other working YouTube links. Cookies from data/cookies.txt are auto-loaded to resolve bot challenges.
+YT_PAUSE = 60
+_yt_refused_urls: dict = {}
 _yt_refused_until = 0.0
-YT_BLOCKED = ("YouTube isn't letting PeakCut download videos right now. Upload the video file instead, or use a "
-              "Twitch or Kick link. YouTube links will be tried again in a few minutes.")
-_BOT_CHECK = re.compile(r"not a bot|confirm you.?re not|sign in to confirm(?! your age)", re.I)
+YT_BLOCKED = ("YouTube requires authentication ('Sign in to confirm you’re not a bot') for this video or live stream. "
+              "To clip protected YouTube videos, export your YouTube cookies to 'data/cookies.txt' (using a browser extension like 'Get cookies.txt LOCALLY'), "
+              "or use a Twitch or Kick link instead.")
+_BOT_CHECK = re.compile(r"not a bot|confirm you.?re not|sign in to confirm(?! your age)|login_required", re.I)
+
+POT_URL = "http://127.0.0.1:4416/ping"
+POT_SERVER_DIR = Path.home() / "bgutil-ytdlp-pot-provider" / "server"
+_pot_checked = False
+
+
+def is_pot_server_running() -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(POT_URL, timeout=1.0) as res:
+            return res.status == 200
+    except Exception:
+        return False
+
+
+def ensure_pot_server():
+    global _pot_checked
+    if _pot_checked and is_pot_server_running():
+        return True
+    if is_pot_server_running():
+        _pot_checked = True
+        return True
+    main_js = POT_SERVER_DIR / "build" / "main.js"
+    if main_js.is_file():
+        try:
+            subprocess.Popen(
+                ["node", str(main_js), "-p", "4416", "-H", "127.0.0.1"],
+                cwd=str(POT_SERVER_DIR),
+                creationflags=NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            for _ in range(8):
+                time.sleep(0.25)
+                if is_pot_server_running():
+                    _pot_checked = True
+                    return True
+        except Exception:
+            pass
+    return False
 
 
 class YouTubeBlocked(RuntimeError):
@@ -34,21 +76,42 @@ def is_youtube(url: str) -> bool:
     return host in ("youtube.com", "youtu.be") or host.endswith((".youtube.com", ".youtu.be"))
 
 
-def youtube_paused() -> bool:
-    return time.time() < _yt_refused_until
+def _url_key(url: str) -> str:
+    from urllib.parse import urlparse, parse_qs
+    try:
+        u = urlparse((url or "").strip())
+        qs = parse_qs(u.query)
+        if "v" in qs and qs["v"]:
+            return qs["v"][0]
+        parts = [p for p in u.path.split("/") if p]
+        if parts:
+            return parts[-1]
+        return url.strip().lower()
+    except Exception:
+        return (url or "").strip().lower()
+
+
+def youtube_paused(url: str = "") -> bool:
+    now = time.time()
+    if url:
+        k = _url_key(url)
+        if k in _yt_refused_urls and now < _yt_refused_urls[k]:
+            return True
+    return now < _yt_refused_until
 
 
 def check_youtube(url: str):
-    """Raise YouTubeBlocked straight away if YouTube is refusing this server right now."""
-    if is_youtube(url) and youtube_paused():
+    """Raise YouTubeBlocked straight away if this YouTube link is refusing right now."""
+    if is_youtube(url) and youtube_paused(url):
         raise YouTubeBlocked(YT_BLOCKED)
 
 
 def note_refusal(url: str, err) -> bool:
-    """If this error is YouTube refusing the server, pause YouTube links for a while. True if it was."""
+    """If this error is YouTube refusing with bot check, record refusal for this video."""
     global _yt_refused_until
     if is_youtube(url) and _BOT_CHECK.search(str(err)):
-        _yt_refused_until = time.time() + YT_PAUSE
+        k = _url_key(url)
+        _yt_refused_urls[k] = time.time() + YT_PAUSE
         return True
     return False
 
@@ -97,10 +160,39 @@ class _Quiet:
 
 def _ydl(opts):
     import yt_dlp
-    # a channel or playlist link is answered as "a list" straight away, never walked video by video
-    return yt_dlp.YoutubeDL({"noplaylist": True, "quiet": True, "no_warnings": True, "logger": _Quiet(),
-                             "extract_flat": "in_playlist", "playlistend": 1, "socket_timeout": 20,
-                             "concurrent_fragment_downloads": 4, **opts})
+    ensure_pot_server()
+    base = {
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "logger": _Quiet(),
+        "extract_flat": "in_playlist",
+        "playlistend": 1,
+        "socket_timeout": 20,
+        "concurrent_fragment_downloads": 4,
+        "js_runtimes": {"node": {}},
+        "remote_components": ["ejs:github"],
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web_safari", "mweb", "android"]
+            },
+            "youtubepot": {
+                "provider": ["bgutil:http"]
+            }
+        }
+    }
+    cookie_file = config.DATA_DIR / "cookies.txt"
+    if not cookie_file.is_file():
+        cookie_file = config.DATA_DIR / "yt_cookies.txt"
+    if cookie_file.is_file():
+        base["cookiefile"] = str(cookie_file)
+    merged = {**base, **opts}
+    if "extractor_args" in opts:
+        ea = dict(base["extractor_args"])
+        for k, v in opts["extractor_args"].items():
+            ea.setdefault(k, {}).update(v)
+        merged["extractor_args"] = ea
+    return yt_dlp.YoutubeDL(merged)
 
 
 def _video_format(height):

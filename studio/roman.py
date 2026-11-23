@@ -261,3 +261,148 @@ def unicodedata_nfc(s: str) -> str:
 def words(ws: list) -> list:
     """Caption words ({'w', 's', 'e'}) with any Hindi or Urdu in Roman letters. Timings are untouched."""
     return [dict(w, w=to_roman(w["w"])) if needs_roman(w.get("w", "")) else w for w in ws]
+
+
+# ---------------------------------------------------------------- Conversational Hinglish & ASR correction
+# Strictly distinctive words that do not collide with standard English vocabulary
+HINGLISH_WORDS = {
+    # Pronouns, addresses & people
+    "bhai", "bhiya", "bhaiya", "yaar", "yar", "apna", "apni", "apne",
+    "mera", "meri", "mere", "tera", "teri", "tere", "uska", "uski", "uske",
+    "iska", "iski", "iske", "hum", "aap", "tum", "mujhe", "tujhe", "humein",
+    "unhe", "unko", "isko", "usko", "banda", "bande", "bandi",
+    # Questions & particles
+    "kya", "kyun", "kyu", "kaise", "kaisa", "kaisi", "kahan", "kab", "kaun", "kitna",
+    "kitne", "kitni", "nahi", "nahin", "haan", "matlab", "toh", "woh", "yeh",
+    # Common verbs & gaming calls
+    "karo", "karna", "kare", "karenge", "karega", "karegi", "kiya", "kiye",
+    "dekh", "dekho", "dekhna", "dekha", "dena", "diya", "lena", "liya",
+    "chalo", "chale", "chalna", "jana", "gaya", "gayi", "gaye",
+    "bolo", "bolna", "batao", "batana", "bataya",
+    "ruko", "rukna", "aana", "aaya", "aayi", "aaye",
+    "samjha", "samjhe", "samjho", "samajh", "maaro", "marna", "maara",
+    "bachao", "nikal", "niklo", "laga", "lagi", "lage",
+    "hoga", "hogi", "honge", "hua", "hui", "hue", "hain", "hoon",
+    "raha", "rahi", "rahe",
+    # Adjectives, adverbs, exclamations & common slang
+    "arre", "arrey", "accha", "acha", "achha", "theek", "sahi", "galat",
+    "jaldi", "aaram", "dheere", "bahut", "bohot", "zyada", "kuch",
+    "abhi", "kabhi", "aaj", "yahan", "wahan", "aage", "peeche",
+    "upar", "niche", "paas", "door", "saath", "alag", "seedha",
+    "pata", "dhyan", "khud", "lekin", "magar", "shukriya",
+    "goli", "paise", "rupay", "bawaal", "masti", "faadu"
+}
+
+DISTINCTIVE_MISHEARINGS = {
+    "array", "aray", "a ray", "mudlab", "challow", "atya", "juldi", "joldi", "somja", "samja", "bato", "batta"
+}
+
+INDIAN_STREAMING_KEYWORDS = {
+    "bgmi", "pubg", "mortal", "dynamo", "scout", "technogamerz", "techno", "carryminati",
+    "mythpat", "totalgaming", "triggeredinsaan", "payal", "jonathan", "snax",
+    "hindi", "hinglish", "deshi", "desi", "india", "indian", "masti", "clutch", "dhamaka"
+}
+
+# ASR phonetic mishearings when English models transcribe Indian accents or Hinglish
+HINGLISH_PHONETIC_PAIRS = {
+    # arre / arrey
+    "array": "arre", "aray": "arre", "a ray": "arre", "are": "arre", "arrey": "arre",
+    # bhai
+    "bye": "bhai", "by": "bhai", "buy": "bhai", "pie": "bhai", "boy": "bhai", "bow": "bhai", "bye-bye": "bhai",
+    # yaar
+    "year": "yaar", "yard": "yaar", "your": "yaar", "yarr": "yaar", "ur": "yaar",
+    # kya
+    "can": "kya", "care": "kya", "kia": "kya", "keya": "kya", "cat": "kya",
+    # nahi
+    "night": "nahi", "nay": "nahi", "nigh": "nahi", "nine": "nahi", "nahe": "nahi", "nahin": "nahi",
+    # matlab
+    "mud love": "matlab", "mud": "matlab", "mat lab": "matlab", "mudlab": "matlab", "mutlab": "matlab",
+    # dekh / dekho
+    "deck": "dekh", "tech": "dekh", "deco": "dekho",
+    # theek
+    "thick": "theek", "tick": "theek", "teak": "theek", "thik": "theek", "take": "theek",
+    # kar / karo
+    "car": "kar", "curl": "kar", "curr": "kar", "care": "kar",
+    # chalo
+    "challow": "chalo", "shallow": "chalo", "hello": "chalo", "chal": "chal",
+    # accha / acha
+    "acha": "accha", "atya": "accha", "a cha": "accha", "atcha": "accha",
+    # batao
+    "butt out": "batao", "bat out": "batao", "batta": "batao", "bato": "batao",
+    # jaldi
+    "jolly": "jaldi", "gelly": "jaldi", "juldi": "jaldi", "joldi": "jaldi",
+    # ruk / roko
+    "rook": "ruk",
+    # bol / bolo
+    "ball": "bol", "bowl": "bol",
+    # samjha
+    "some ja": "samjha", "somja": "samjha", "samja": "samjha",
+    # peeche
+    "pitcher": "peeche", "piche": "peeche",
+    # banda / bande
+    "panda": "banda", "bonda": "banda",
+    # pata
+    "potter": "pata", "pasta": "pata",
+    # de / do / le / lo
+    "the": "de", "day": "de", "dey": "de", "dough": "do", "though": "do", "lay": "le", "low": "lo",
+    # ek / do
+    "ache": "ek", "egg": "ek",
+    # gaya
+    "guy": "gaya", "gaia": "gaya",
+    # sahi
+    "sigh": "sahi", "sci": "sahi",
+    # upar
+    "upper": "upar",
+}
+
+
+def is_hinglish(words_or_text, title: str = "") -> bool:
+    """Detect if the caption words, text or title contain Hindi/Urdu, Hinglish, or Indian streaming context."""
+    if isinstance(words_or_text, list):
+        for item in words_or_text:
+            txt = item["w"] if isinstance(item, dict) and "w" in item else str(item)
+            if needs_roman(txt):
+                return True
+        plain_words = [re.sub(r"[^a-z]", "", (item["w"] if isinstance(item, dict) else str(item)).lower())
+                       for item in words_or_text]
+    else:
+        txt = str(words_or_text or "")
+        if needs_roman(txt):
+            return True
+        plain_words = re.findall(r"[a-z]+", txt.lower())
+
+    if title:
+        if needs_roman(title):
+            return True
+        title_tokens = set(re.findall(r"[a-z0-9]+", title.lower()))
+        if title_tokens & INDIAN_STREAMING_KEYWORDS:
+            return True
+        if sum(1 for tok in title_tokens if tok in HINGLISH_WORDS) >= 1:
+            return True
+
+    if any(w in HINGLISH_WORDS for w in plain_words):
+        return True
+    if any(w in DISTINCTIVE_MISHEARINGS for w in plain_words):
+        return True
+    return False
+
+
+def is_phonetic_variant(old: str, new: str) -> bool:
+    """Is 'new' a plausible phonetic or ASR correction of 'old' in Hinglish / Indian English?"""
+    a = re.sub(r"[^a-z0-9]", "", (old or "").lower())
+    b = re.sub(r"[^a-z0-9]", "", (new or "").lower())
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if HINGLISH_PHONETIC_PAIRS.get(a) == b:
+        return True
+    old_clean = re.sub(r"[^a-z0-9 ]", "", (old or "").lower()).strip()
+    if HINGLISH_PHONETIC_PAIRS.get(old_clean) == b:
+        return True
+    if b in HINGLISH_WORDS:
+        cons_a = re.sub(r"[aeiouy]", "", a)
+        cons_b = re.sub(r"[aeiouy]", "", b)
+        if cons_a and cons_b and (cons_a in cons_b or cons_b in cons_a):
+            return True
+    return False

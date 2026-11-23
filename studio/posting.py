@@ -6,7 +6,7 @@ from pathlib import Path
 
 import json
 
-from . import accounts, alerts, config, creators, ctx, jobs, live
+from . import accounts, alerts, config, creators, ctx, jobs, live, seo
 
 _lock = threading.RLock()
 _FILE = config.DATA_DIR / "posts.json"
@@ -89,20 +89,88 @@ def enqueue(job, clip, account_ids, now=False) -> list:
 
 
 def on_clip_ready(job, clip):
-    """Called once when a clip first finishes rendering."""
-    c = creators.get(job["creator"])
-    if not c or not c["autopost"] or not c["accounts"]:
+    """Called once when a clip first finishes rendering.
+    Enriches with SEO metadata and automatically queues for posting without waiting for manual confirmation."""
+    c = creators.get(job.get("creator"))
+    streamer = job.get("uploader") or (c.get("name") if c else "") or "Streamer"
+    game = job.get("game") or (c.get("game") if c else "") or "GTA 6"
+    hook = clip.get("hook") or clip.get("title") or "Viral Moment"
+
+    # 1. Enrich clip with high-retention title, description, and hashtags
+    meta = seo.generate_shorts_metadata(hook=hook, uploader=streamer, game=game, transcript_snippet=clip.get("summary", ""))
+    clip["title"] = meta["title"]
+    clip["description"] = meta["description"]
+    clip["hashtags"] = [h.lstrip("#") for h in meta["hashtags"]]
+    clip["tags"] = meta["tags"]
+    jobs.save(job)
+
+    # 2. Automated posting: determine destination accounts
+    account_ids = []
+    if c and c.get("accounts"):
+        account_ids = list(c["accounts"])
+    else:
+        connected = accounts.list_accounts()
+        yt_accs = [a["id"] for a in connected if a["platform"] == "youtube"]
+        account_ids = yt_accs if yt_accs else [a["id"] for a in connected]
+
+    if not account_ids:
         return
-    if clip.get("score", 0) < c["post_min_score"]:
-        return  # includes hand-made clips (score 0): those wait for you to press Post
-    made = enqueue(job, clip, c["accounts"])
+
+    # Check minimum score threshold only if explicitly configured in creator settings
+    min_score = c.get("post_min_score", 0) if (c and c.get("autopost")) else 0
+    if clip.get("score", 100) < min_score:
+        return
+
+    # Auto-upload without waiting for manual confirmation: enqueue for immediate posting
+    made = enqueue(job, clip, account_ids, now=True)
     if made:
-        creators.log(c["id"], f"Queued for {len(made)} account(s): {clip.get('title') or clip.get('hook')}")
+        creators.log(job.get("creator"), f"Auto-scheduled immediate upload for {len(made)} account(s): {clip['title']}")
 
 
 def _caption(clip, creator):
     tags = " ".join("#" + h for h in clip.get("hashtags", []))
     return "\n\n".join(x for x in (clip.get("description", ""), tags, creator.get("post_footer", "")) if x)
+
+
+def _check_and_purge_clip(p):
+    """Purge local .mp4 video if all configured platform targets have finished posting."""
+    with _lock:
+        clip_posts = [p2 for p2 in _posts if p2.get("job") == p["job"] and p2.get("clip") == p["clip"] and p2.get("status") != "cancelled"]
+        # If any post for this clip is still scheduled or actively posting, keep the file on disk
+        if any(p2.get("status") in OPEN for p2 in clip_posts):
+            return
+        # Must have at least one successful post
+        if not any(p2.get("status") == "posted" for p2 in clip_posts):
+            return
+
+    job = jobs.get(p["job"])
+    if not job:
+        return
+    clip = next((c for c in job.get("clips", []) if c["id"] == p["clip"]), None)
+    if not clip or clip.get("purged"):
+        return
+
+    # Delete the rendered clip file (.mp4)
+    clip_file = Path(job["dir"]) / "clips" / clip.get("file", "")
+    if clip_file.exists():
+        try:
+            clip_file.unlink()
+        except OSError:
+            pass
+
+    # Delete raw slice if it was inside job/clips
+    if clip.get("src"):
+        try:
+            src_p = Path(clip["src"])
+            if src_p.exists() and str(src_p).startswith(str(Path(job["dir"]) / "clips")):
+                src_p.unlink()
+        except OSError:
+            pass
+
+    clip["purged"] = True
+    jobs.save(job)
+    platforms = sorted({p2.get("platform") for p2 in clip_posts if p2.get("status") == "posted"})
+    creators.log(p.get("creator"), f"Purged local video for '{p.get('title')}' after uploading to {', '.join(platforms)}")
 
 
 def _post(p):
@@ -112,9 +180,13 @@ def _post(p):
     try:
         if not clip or clip.get("status") != "done":
             raise RuntimeError("The clip no longer exists or is not finished.")
+        if clip.get("purged"):
+            raise RuntimeError("The local video was already uploaded and cleaned from disk.")
         if not acc:
             raise RuntimeError("That account was disconnected.")
         path = Path(job["dir"]) / "clips" / clip["file"]
+        if not path.exists():
+            raise RuntimeError(f"Local video file not found: {path.name}")
         creator = creators.get(job["creator"]) or dict(creators.DEFAULTS, name="clips")
         title, cap = clip.get("title") or clip.get("hook") or "Clip", _caption(clip, creator)
         if acc["platform"] == "youtube":
@@ -138,6 +210,8 @@ def _post(p):
             alerts.notify(f"post failed on {p['account_name']} ({p['title']}): {p['error'][:200]}", kind="post")
     _save()
     _mirror(p)
+    if p.get("status") == "posted":
+        _check_and_purge_clip(p)
 
 
 def _run():
