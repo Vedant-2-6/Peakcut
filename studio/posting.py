@@ -174,6 +174,11 @@ def _check_and_purge_clip(p):
 
 
 def _post(p):
+    with _lock:
+        match = next((item for item in _posts if item["id"] == p["id"]), None)
+        if match is not None and match is not p:
+            match.update(p)
+            p = match
     job = jobs.get(p["job"])
     clip = next((c for c in job["clips"] if c["id"] == p["clip"]), None) if job else None
     acc = accounts.get(p["account"])
