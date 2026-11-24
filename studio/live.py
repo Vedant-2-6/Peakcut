@@ -75,7 +75,7 @@ def resolve(url: str) -> dict:
     """Ask yt-dlp for the stream's playable address. Raises NotLive if the channel is offline."""
     if media.is_youtube(url) and media.youtube_paused(url):
         raise NotLive(media.YT_BLOCKED)
-    opts = {"format": "b[height<=720]/bv*[height<=720]+ba/b", "extract_flat": False}
+    opts = {"format": "bv*[height<=1080]+ba/b[height<=1080]/b", "extract_flat": False}
     try:
         with media._ydl(opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -664,12 +664,12 @@ class Session:
             return
         finally:
             lst.unlink(missing_ok=True)
-        # Only the gameplay layout uses a webcam, and only once the clip's own file is written: the
-        # webcam is looked for in it, once per stream.
-        if clip.get("layout") == "gameplay":
-            if not self.facecam_checked:
+        # Only gameplay/split layouts use a webcam, detected on the clip's source file.
+        if clip.get("layout") in ("gameplay", "split"):
+            if not self.facecam_box and getattr(self, "facecam_tries", 0) < 3:
+                self.facecam_tries = getattr(self, "facecam_tries", 0) + 1
                 self.facecam_box = self._find_facecam(src)
-                self.facecam_checked = True
+                self.facecam_checked = bool(self.facecam_box) or self.facecam_tries >= 3
             if self.facecam_box:
                 clip["facecam"] = self.facecam_box
         dur = segs[-1][2] - segs[0][1]

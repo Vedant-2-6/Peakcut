@@ -96,8 +96,14 @@ def on_clip_ready(job, clip):
     game = job.get("game") or (c.get("game") if c else "") or "GTA 6"
     hook = clip.get("hook") or clip.get("title") or "Viral Moment"
 
-    # 1. Enrich clip with high-retention title, description, and hashtags
-    meta = seo.generate_shorts_metadata(hook=hook, uploader=streamer, game=game, transcript_snippet=clip.get("summary", ""))
+    # 1. Enrich clip with high-retention clickbait title, description, and hashtags
+    meta = seo.generate_shorts_metadata(
+        hook=hook,
+        uploader=streamer,
+        game=game,
+        transcript_snippet=clip.get("summary", ""),
+        ai_title=clip.get("title", ""),
+    )
     clip["title"] = meta["title"]
     clip["description"] = meta["description"]
     clip["hashtags"] = [h.lstrip("#") for h in meta["hashtags"]]

@@ -161,6 +161,7 @@ def _get_or_create_creator(name: str, url: str) -> dict:
         "decide_mode": "either",
         "must_clip_min": 15,
         "min_score": 70,
+        "layout": "split",
         "autopost": bool(acc_ids),
         "accounts": acc_ids,
         "ai_only_on_spike": False,

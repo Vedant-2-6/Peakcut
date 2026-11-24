@@ -87,14 +87,14 @@ def _profiles(frames: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return gx, gy
 
 
-def _peaks(profile: np.ndarray, limit: int) -> list[tuple[int, float]]:
+def _peaks(profile: np.ndarray, limit: int, edge: float = EDGE) -> list[tuple[int, float]]:
     """The lines that stand out: (where, how much)."""
     if len(profile) < 3:
         return []
     med = float(np.median(profile)) or 1.0
     out = []
     for i in range(1, len(profile) - 1):
-        if profile[i] >= profile[i - 1] and profile[i] > profile[i + 1] and profile[i] > EDGE * med:
+        if profile[i] >= profile[i - 1] and profile[i] > profile[i + 1] and profile[i] > edge * med:
             out.append((i, float(profile[i] / med)))
     return sorted(out, key=lambda p: -p[1])[:limit]
 
@@ -127,7 +127,7 @@ def _stillness(frames: np.ndarray) -> np.ndarray:
     return frames.astype(np.float32).std(axis=0)
 
 
-def _plausible(x0, y0, x1, y1, still, light, game, share=STILL_SHARE):
+def _plausible(x0, y0, x1, y1, still, light, game, share=STILL_SHARE, still_frac=STILL_FRAC):
     """Could this rectangle be a webcam picture? Judged on its shape, its stillness and its light.
 
     Returns how much it moves, or None. Nothing here says which corner it is in: a webcam may sit in a
@@ -143,7 +143,7 @@ def _plausible(x0, y0, x1, y1, still, light, game, share=STILL_SHARE):
     inside = still[b:d, a:c]
     if not inside.size:
         return None
-    cut = max(STILL_MIN, STILL_FRAC * game)
+    cut = max(STILL_MIN, still_frac * game)
     moving = float(np.median(inside))
     if moving > cut:
         return None                    # it changes with the game: it is the game
@@ -154,7 +154,7 @@ def _plausible(x0, y0, x1, y1, still, light, game, share=STILL_SHARE):
     return moving
 
 
-def _local(vpeaks, hpeaks, still, light):
+def _local(vpeaks, hpeaks, still, light, share=STILL_SHARE, still_frac=STILL_FRAC):
     """Every rectangle the strong straight lines can make, that still looks like a camera.
 
     Returns them best first: the one whose weakest border is the strongest, and of those the bigger."""
@@ -174,7 +174,7 @@ def _local(vpeaks, hpeaks, still, light):
                     score = wscore + hy0 + [hs[v] for v in (y1,) if v in hs]
                     if len(score) < 2:
                         continue       # a box needs two borders of its own, or it is just the frame
-                    moving = _plausible(x0, y0, x1, y1, still, light, game)
+                    moving = _plausible(x0, y0, x1, y1, still, light, game, share=share, still_frac=still_frac)
                     if moving is None:
                         continue
                     key = (min(score), (x1 - x0) * (y1 - y0))
@@ -362,6 +362,13 @@ def detect(path: str | Path, ask=None) -> dict | None:
         seen = _seen(path, hinted, w, h, still, light)
         if seen:
             return seen
+    if not found:
+        # Relaxed secondary pass for real-world gaming streams where facecam borders are softer
+        # or streamer moves during hype moments, requiring clear corner/edge borders.
+        rvpeaks, rhpeaks = _peaks(vx, 40, edge=1.75), _peaks(hy, 40, edge=1.75)
+        if rvpeaks and rhpeaks:
+            rfound = _local(rvpeaks, rhpeaks, still, light, share=0.45, still_frac=0.50)
+            found = [c for c in rfound if c.get("score", 0) >= 1.85]
     if not found:
         return None
     return _finish(path, found[0], w, h, still)

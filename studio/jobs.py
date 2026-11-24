@@ -107,7 +107,7 @@ _by_user: dict = {}                       # user -> {job id: job}: listing one p
 _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
-DEFAULTS = {"max_clips": 6, "min_len": 40, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
+DEFAULTS = {"max_clips": 6, "min_len": 40, "max_len": 60, "style": "bounce", "layout": "split", "quality": 1080,
             "range_start": None, "range_end": None, "captions": True}
 
 
@@ -524,7 +524,7 @@ def _covers(words: list, start: float, end: float) -> bool:
     return len(inside) >= 25 * minutes and inside[-1]["s"] >= start + 0.85 * (end - start)
 
 
-def _facecam(job) -> list | None:
+def _facecam(job, fallback_path=None) -> list | None:
     """Where the webcam is in the source: once for the whole video, for every clip of it.
 
     Only a sure answer is used. A box that is a scoreboard drawn over the game would
@@ -532,13 +532,15 @@ def _facecam(job) -> list | None:
     the AI, which tells a person from a game character better than any measurement can;
     what it says is measured again on the picture, so it cannot do any harm."""
     path = job.get("source_path")
+    if (not path or not Path(path).is_file()) and fallback_path and Path(fallback_path).is_file():
+        path = fallback_path
     if not path or not Path(path).is_file():
         return None
     try:
         box = facecam.detect(path, ask=brain.look_for_facecam)
     except Exception:  # noqa: BLE001 - a missing facecam is not a failure
         return None
-    if not box or box.get("conf") != "high":
+    if not box or (box.get("conf") != "high" and box.get("score", 0) < 2.0):
         return None
     job["facecam"] = [box["x"], box["y"], box["w"], box["h"]]
     return job["facecam"]
@@ -657,6 +659,13 @@ def _run_job(job):
         began[clip["id"]] = time.time()
         if src["type"] == "url" and (pieces or not whole_video()):
             _fetch_piece(job, clip, audio)
+        if clip["status"] != "error" and clip.get("layout") in ("gameplay", "split") and not clip.get("facecam"):
+            with vlock:
+                if not job.get("facecam") and vstate.get("fc_tries", 0) < 3:
+                    vstate["fc_tries"] = vstate.get("fc_tries", 0) + 1
+                    _facecam(job, fallback_path=clip.get("src"))
+            if job.get("facecam"):
+                clip["facecam"] = job["facecam"]
         if clip["status"] != "error" and clip.get("captions", True) and yt and yt[1].lower().startswith("en"):
             # The clip was found with YouTube's transcript. What is shown on screen comes from our own model,
             # run on just this clip: full punctuation, nothing blanked out, timings to the word.
@@ -769,9 +778,8 @@ def _run_job(job):
             c.update(id=f"clip{len(job['clips']) + 1:02d}", start=round(c["start"] + shift, 2),
                      end=round(c["end"] + shift, 2), style=o["style"], layout=o["layout"],
                      captions=o.get("captions", True), status="queued", version=0)
-            # Only the gameplay layout uses a webcam, so it is only looked for then, and only once: a
-            # stream with no webcam is not looked for again on every clip of it.
-            if o["layout"] == "gameplay" and face is False:
+            # Only gameplay/split layouts use a webcam; look for it once per job if source is already local.
+            if o["layout"] in ("gameplay", "split") and face is False:
                 face = _facecam(job)
             if face:
                 c["facecam"] = face

@@ -57,8 +57,8 @@ Rules:
 - Do not pick intros, sponsor reads, "like and subscribe", or dead air.
 - Skip weak moments. Fewer strong clips beat many weak ones. Return [] if nothing is worth clipping.
 - score: 0-100, how likely a stranger keeps watching. Be honest; most clips are 50-80.
-- hook: at most 5 words, ALL CAPS, shown as big text on the video. Curiosity, but true to what happens.
-- title: at most 70 characters, for the post.
+- hook: at most 5 words, ALL CAPS, shown as big text on the video. Curiosity, punchy reaction, or high stakes (never boring filler like "THANK YOU" or "OKAY").
+- title: at most 65 characters, written as an irresistible, high-CTR viral YouTube Shorts clickbait title with curiosity gap, shock, or stakes + 1 fitting emoji (e.g. "He NEVER Expected This GTA 6 Glitch... 💀", "CarryisLive Broke GTA 6 In 10 Seconds! 🚨", "WAIT FOR THE ENDING... He Lost Everything! 🤯", "99% Miss What Happened Here... 😱"). NEVER copy random filler dialogue as the title.
 - description: one or two sentences.
 - hashtags: 5 tags without the # sign.
 - highlight_words: 3 to 6 single words spoken in the clip that carry the punch.
