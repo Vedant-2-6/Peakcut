@@ -353,8 +353,11 @@ def _yt_token(acc) -> str:
 
 
 def youtube_upload(acc, path: Path, title: str, description: str, tags: list, privacy: str):
+    from . import censor
     token = _yt_token(acc)
-    meta = {"snippet": {"title": re.sub(r"[<>]", "", title)[:100] or "Clip", "description": re.sub(r"[<>]", "", description)[:4900],
+    safe_title = censor.clean_title_metadata(re.sub(r"[<>]", "", title))[:100] or "Clip"
+    safe_description = censor.clean_title_metadata(re.sub(r"[<>]", "", description))[:4900]
+    meta = {"snippet": {"title": safe_title, "description": safe_description,
                         "tags": tags[:15], "categoryId": "20"},
             "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": False}}
     size = path.stat().st_size

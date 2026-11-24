@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import config, roman
+from . import censor, config, roman
 from .media import NO_WINDOW, run
 
 W, H = config.OUT_W, config.OUT_H
@@ -180,13 +180,13 @@ Style: Attrib,{HOOK['font']},30,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     dur = end - start
-    ev = _hook_events(_clean(hook), dur, hook_y)
+    ev = _hook_events(_clean(censor.sanitize_hook(hook)), dur, hook_y)
     if credit:
         c_name = re.sub(r"[^\w\s\-.]", "", str(credit))[:35].strip()
         if c_name:
             ev.append(f"Dialogue: 3,{_ts(0)},{_ts(dur)},Attrib,,0,0,0,,{{\\an7\\pos(50,80)\\fad(300,300)\\c&HFFFFFF&\\bord2\\3c&H000000&}}Via: @{c_name}")
     f = _Font.get(st["font"])
-    inside = [dict(w, w=_clean(w["w"])) for w in words if w["s"] >= start - 0.05 and w["s"] < end]
+    inside = [dict(w, w=censor.mask_caption_word(_clean(w["w"]))) for w in words if w["s"] >= start - 0.05 and w["s"] < end]
     inside = sorted((w for w in inside if w["w"]), key=lambda w: w["s"])
     for i, w in enumerate(inside[:-1]):
         w["e"] = max(w["s"], min(w["e"], inside[i + 1]["s"]))

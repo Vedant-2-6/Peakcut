@@ -2,6 +2,8 @@
 import random
 import re
 
+from . import censor
+
 TRENDING_HASHTAGS = {
     "gta 6": ["#GTA6", "#GTAVI", "#Gaming", "#Shorts", "#ViralGaming"],
     "bgmi": ["#BGMI", "#BGMILive", "#Gaming", "#Shorts", "#Clutch"],
@@ -24,10 +26,15 @@ def clean_name(val: str, max_len: int = 40) -> str:
 
 
 def generate_shorts_metadata(hook: str, uploader: str = "", game: str = "GTA 6", transcript_snippet: str = "") -> dict:
-    """Generate high-retention title, description, and SEO tags for YouTube Shorts."""
+    """Generate high-retention title, description, and SEO tags for YouTube Shorts.
+
+    Completely strips profanity so videos are never age-restricted by YouTube algorithms.
+    """
     game_clean = clean_name(game) or "GTA 6"
     uploader_clean = clean_name(uploader) or "Streamer"
-    hook_clean = clean_name(hook, 50).rstrip(".!?")
+    # Ensure hook is completely clean of swear words
+    hook_clean = censor.sanitize_hook(hook)
+    hook_clean = clean_name(hook_clean, 50).rstrip(".!?")
     game_tag = re.sub(r"\s+", "", game_clean)
 
     # 1. High CTR Title (under 75 chars to avoid mobile truncation)
@@ -37,6 +44,7 @@ def generate_shorts_metadata(hook: str, uploader: str = "", game: str = "GTA 6",
         tmpl = random.choice(TITLE_TEMPLATES)
         title = tmpl.format(hook=hook_clean or "Crazy Moment", game=game_clean, game_tag=game_tag, streamer=uploader_clean)
 
+    title = censor.clean_title_metadata(title)
     if len(title) > 90:
         title = title[:86] + "... #Shorts"
 
@@ -47,7 +55,7 @@ def generate_shorts_metadata(hook: str, uploader: str = "", game: str = "GTA 6",
 
     # 3. High-SEO Description with Attribution & Fair Use Notice
     desc_lines = [
-        f"{hook_clean if hook_clean else title}",
+        f"{censor.clean_title_metadata(hook_clean if hook_clean else title)}",
         "",
         f"Streamer: @{uploader_clean}",
         f"Game: {game_clean}",
