@@ -312,6 +312,8 @@ def see(prompt: str, image: bytes, timeout: float | None = None) -> tuple[str, i
     if not ready() or not image or not models():
         return "", 0, 0
     model = models()[0]
+    if provider() == "ollama" and not any(k in model.lower() for k in ("vision", "llava", "moondream", "minicpm", "-vl", "vl-", "gemma3")):
+        return "", 0, 0
     b64 = base64.b64encode(image).decode()
     how = PROVIDERS[provider()][2]
     if how == "gemini":

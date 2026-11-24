@@ -107,11 +107,11 @@ _by_user: dict = {}                       # user -> {job id: job}: listing one p
 _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
-DEFAULTS = {"max_clips": 6, "min_len": 40, "max_len": 60, "style": "bounce", "layout": "split", "quality": 1080,
+DEFAULTS = {"max_clips": 6, "min_len": 40, "max_len": 60, "min_score": 75, "style": "bounce", "layout": "split", "quality": 1080,
             "range_start": None, "range_end": None, "captions": True}
 
 
-LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
+LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "min_score": (0, 100), "quality": (360, 1080)}
 
 
 def clean_options(options) -> dict:
@@ -757,7 +757,8 @@ def _run_job(job):
         quota = max(1, math.ceil(left / (len(blocks) - bi)))
         s0 = int((a - lo) / 16000)
         found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append, game=game)
+                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append,
+                                     game=game, min_score=int(o.get("min_score", DEFAULTS["min_score"])))
         tokens += ai.get("tokens", 0)
         model = ai.get("model") or model
         if ai.get("note"):

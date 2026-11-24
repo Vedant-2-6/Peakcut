@@ -531,11 +531,13 @@ class Session:
             return self._verdict(verdict, "AI error: " + _clean_err(e, 85))
         self.checks += 1
         self.tokens += tok
-        keep = [c for c in cands if c["score"] >= (40 if must else st["min_score"])]
+        z = brain.loud_zscore(np.array(self.db, dtype=np.float32))
+        for c in cands:
+            c["score"] = brain.calibrate_score(c, z, win, c["start"], c["end"])
+        keep = [c for c in cands if c["score"] >= (60 if must else st["min_score"])]
         verdict["transcript"] = max((c["score"] for c in cands), default=0)
         if not keep:
             return self._verdict(verdict, "Words judge: nothing clip-worthy")
-        z = brain.loud_zscore(np.array(self.db, dtype=np.float32))
         lo, hi = max(0, int(ws)), max(0, int(now) + 1)
         if hi <= lo:
             hi = lo + 1
@@ -559,7 +561,8 @@ class Session:
             rs = max((m["score"] for m in match), default=0)
             verdict["reaction"] = rs
             both = bool(match)
-            word_ok = (c["score"] >= st["min_score"]) if st.get("decide_mode") == "either" else (c["score"] >= max(80, st["min_score"]))
+            # Single-judge fallback requires a distinctly strong score so quiet chatter doesn't slip through
+            word_ok = (c["score"] >= max(82, st["min_score"] + 7)) if st.get("decide_mode") == "either" else False
             ok = both or word_ok or (must and added == 0)
             if not ok:
                 self.rejected += 1

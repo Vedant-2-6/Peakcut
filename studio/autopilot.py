@@ -159,8 +159,8 @@ def _get_or_create_creator(name: str, url: str) -> dict:
 
     patch = {
         "decide_mode": "either",
-        "must_clip_min": 15,
-        "min_score": 70,
+        "must_clip_min": 0,
+        "min_score": 75,
         "layout": "split",
         "autopost": bool(acc_ids),
         "accounts": acc_ids,

@@ -31,16 +31,16 @@ SCHEMA = {
     },
 }
 
-HEAD = """You are a clip scout for short-form gaming and streaming videos (YouTube Shorts, Reels, TikTok).
-Below is a timestamped transcript of part of a video. Each line starts with [seconds]. Lines marked (LOUD)
-are where the audio got much louder than usual: shouting, laughing, sudden action. Lines marked (CHAT)
-are where the live chat suddenly got much busier, which usually means viewers reacted to something.
+HEAD = """You are a ruthless viral clip scout for YouTube Shorts, Reels, and TikTok.
+Below is a timestamped transcript of part of a stream or video. Each line starts with [seconds]. Lines marked (LOUD)
+are where audio spiked (shouting, screaming, laughing, sudden action). Lines marked (CHAT) are where live chat exploded.
 
 Video title: {title}
 Channel: {uploader}
 
-Pick up to {n} moments that would work as standalone clips for someone who has never seen the stream:
-funny moments, fails, clutch plays, rage, shock, hot takes, or a short story with a payoff.
+Find ONLY the absolute best up to {n} standalone moments that would make a stranger STOP scrolling immediately:
+- Look for: chaotic plot twists, hilarious fails, unbelievable clutches, genuine rage/shock reactions, jaw-dropping glitches, or punchy comedic stories with a strong ending payoff.
+- REJECT boring small talk, thanking donations/superchats, casual driving/walking, reading chat calmly, menu browsing, or inside jokes that need 5 minutes of context.
 """
 
 LIVE_NOTE = """
@@ -55,8 +55,13 @@ Rules:
 - Start on the setup line, not mid-sentence. End right after the payoff or reaction, on the last word of a
   complete sentence: never in the middle of a sentence or a thought. The clip must make sense on its own.
 - Do not pick intros, sponsor reads, "like and subscribe", or dead air.
-- Skip weak moments. Fewer strong clips beat many weak ones. Return [] if nothing is worth clipping.
-- score: 0-100, how likely a stranger keeps watching. Be honest; most clips are 50-80.
+- Skip weak moments aggressively. 80% of stream minutes are NOT viral—return [] if nothing truly stands out. Never pad results with boring or generic clips.
+- score: 0-100 strict virality score for how well a stranger on YouTube Shorts will retain and rewatch:
+  * 0-49: Boring filler, small talk, donation/chat thanks, quiet gameplay -> MUST return [] or score <= 45.
+  * 50-69: Average banter or routine play; too generic for Shorts.
+  * 70-84: Strong clip with clear comedic timing, rage/shock reaction, or solid action payoff.
+  * 85-100: Undeniable viral banger (insane reaction + (LOUD) spike + immediate hook + hilarious/shocking payoff).
+  Be strict and honest—only score 75+ if you would genuinely stop scrolling to watch it.
 - hook: at most 5 words, ALL CAPS, shown as big text on the video. Curiosity, punchy reaction, or high stakes (never boring filler like "THANK YOU" or "OKAY").
 - title: at most 65 characters, written as an irresistible, high-CTR viral YouTube Shorts clickbait title with curiosity gap, shock, or stakes + 1 fitting emoji (e.g. "He NEVER Expected This GTA 6 Glitch... 💀", "CarryisLive Broke GTA 6 In 10 Seconds! 🚨", "WAIT FOR THE ENDING... He Lost Everything! 🤯", "99% Miss What Happened Here... 😱"). NEVER copy random filler dialogue as the title.
 - description: one or two sentences.
@@ -276,7 +281,49 @@ def _game_rules(game):
     return GAME_RULES.format(game=_safe(games.name_of(game) or str(game), 40), tags=tags)
 
 
-def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=40, max_len=60, log=print, game=None):
+_FILLER_PHRASES = re.compile(
+    r"\b(?:thank you(?: so much)? for|super\s*chat|like and subscribe|follow the channel|good morning|"
+    r"welcome to the stream|shoutout to|how are you guys)\b",
+    re.I,
+)
+
+
+def calibrate_score(clip: dict, z, words: list, s: float, e: float, offset: float = 0.0) -> int:
+    """Combine AI rating with physical audio spikes, opening retention, speech pacing, and anti-filler signals."""
+    score = float(_num(clip.get("score")))
+    # 1. Audio excitement surge (skip if z is all zeros, e.g., synthetic tests without audio)
+    if z is not None and len(z) > 10 and np.any(z != 0):
+        a = max(0, int(s - offset))
+        b = min(len(z), int(e - offset) + 1)
+        if b > a:
+            seg = z[a:b]
+            peak_z = float(np.max(seg))
+            avg_z = float(np.mean(seg))
+            if peak_z >= 2.2:
+                score += 8
+            elif peak_z >= 1.4:
+                score += 4
+            elif peak_z < 0.7 and avg_z < 0.2:
+                score -= 12
+
+    # 2. Retention hook & pacing check
+    cw = [w for w in (words or []) if s - 0.5 <= w.get("s", 0) <= e]
+    if cw:
+        if not any(w.get("s", 0) <= s + 3.0 for w in cw):
+            score -= 8
+        wps = len(cw) / max(1.0, e - s)
+        if wps < 0.6:
+            score -= 10
+
+    # 3. Anti-filler check on hook/title
+    text_meta = f"{clip.get('hook', '')} {clip.get('title', '')}"
+    if _FILLER_PHRASES.search(text_meta):
+        score -= 18
+
+    return max(0, min(100, int(round(score))))
+
+
+def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=40, max_len=60, log=print, game=None, min_score=0):
     z = loud_zscore(db)
     lines = make_lines(words, z)
     if not lines:
@@ -306,9 +353,28 @@ def find_clips(words, db, duration, title="", uploader="", max_clips=6, min_len=
     if not used_model:
         found = fallback_by_loudness(db, words, max_clips, max_len, duration)
         note = "The AI was unavailable, so clips were picked by loudness only."
+    else:
+        # Calibrate scores globally with real audio/pacing signals and drop weak filler below min_score
+        calibrated = []
+        for c in found:
+            cs, ce = _snap(c, lines, words, min_len, max_len, duration)
+            if ce - cs < min(min_len, duration) - 1:
+                continue
+            sc = calibrate_score(c, z, words, cs, ce)
+            c_copy = dict(c, score=sc, _snap_s=cs, _snap_e=ce)
+            calibrated.append(c_copy)
+        strong = [c for c in calibrated if c["score"] >= min_score]
+        if not strong and calibrated and min_score > 0:
+            # Rescue at most top 2 decent highlights (>= 60) if the whole window had nothing >= min_score
+            strong = sorted((c for c in calibrated if c["score"] >= 60), key=lambda x: -x["score"])[:2]
+        found = strong
+
     clips = []
     for c in sorted(found, key=lambda c: -_num(c.get("score"))):
-        s, e = _snap(c, lines, words, min_len, max_len, duration)
+        if "_snap_s" in c:
+            s, e = c["_snap_s"], c["_snap_e"]
+        else:
+            s, e = _snap(c, lines, words, min_len, max_len, duration)
         if e - s < min(min_len, duration) - 1:
             continue
         if _overlaps(s, e, clips):
@@ -366,7 +432,7 @@ def describe(text, title="", uploader="", game=None, timeout=None):
 
 
 # ---------------------------------------------------------------- live: two judges that never see each other's input
-TRANSCRIPT_JUDGE = """You are a clip scout for short-form gaming and streaming videos (YouTube Shorts, Reels, TikTok).
+TRANSCRIPT_JUDGE = """You are a ruthless viral clip scout for YouTube Shorts, Reels, and TikTok.
 You only get the WORDS spoken on a live stream: a timestamped transcript, each line starting with [seconds].
 You cannot hear how loud anything was or see the chat; judge purely on what was said.
 
@@ -376,10 +442,11 @@ Channel: {uploader}
 The transcript covers seconds {start:.0f} to {now:.0f}. If a moment is still unfolding at the very end, leave it out;
 you will see it again in the next check.
 {must}
-Pick up to {n} moments that would work as standalone clips for someone who has never seen the stream:
-funny moments, fails, clutch plays, rage, shock, hot takes, or a short story with a payoff.
+Find ONLY moments with true viral Shorts appeal for a total stranger:
+chaotic plot twists, hilarious fails, unbelievable clutches, genuine rage/shock reactions, jaw-dropping glitches, or a punchy comedic story with a clear payoff.
+REJECT routine small talk, donation reading ("thank you"), menu idling, or dull banter.
 """
-MUST_PICK = "This time you MUST return the single best moment in this stretch, even if it is only decent."
+MUST_PICK = "This time return the single strongest moment in this stretch, only if it truly has reaction or story value."
 NOT_MUST = "Most checks should return []. Only return a moment you would stop scrolling for."
 
 FACE_CAM = """One frame of a gaming stream is attached.

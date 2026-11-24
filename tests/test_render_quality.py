@@ -4,16 +4,33 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from studio import config, creators, jobs, render, seo
+from studio import brain, config, creators, jobs, render, seo
 
 
 class TestSplitLayoutQualityAndClickbait(unittest.TestCase):
 
     def test_defaults_prioritize_split_and_1080p(self):
         self.assertEqual(creators.DEFAULTS["layout"], "split")
+        self.assertEqual(creators.DEFAULTS["min_score"], 75)
+        self.assertEqual(creators.DEFAULTS["must_clip_min"], 0)
         self.assertEqual(jobs.DEFAULTS["layout"], "split")
         self.assertEqual(jobs.DEFAULTS["quality"], 1080)
+        self.assertEqual(jobs.DEFAULTS["min_score"], 75)
         self.assertGreaterEqual(config.OUT_FPS, 60)
+
+    def test_virality_calibration_boosts_hype_and_penalizes_boring_filler(self):
+        import numpy as np
+        # Simulated 60-second audio z-score: quiet monotone everywhere except spike at 35-42s
+        z = np.zeros(60, dtype=np.float32)
+        z[35:43] = 2.8
+        words_hype = [{"w": f"w{i}", "s": float(i), "e": float(i) + 0.5} for i in range(10, 50)]
+        hype_clip = {"score": 76, "hook": "INSANE CLUTCH", "title": "He Broke GTA 6!"}
+        boring_clip = {"score": 76, "hook": "THANK YOU SO MUCH FOR THE SUPER CHAT", "title": "Thank you guys"}
+
+        hype_score = brain.calibrate_score(hype_clip, z, words_hype, 10.0, 50.0)
+        boring_score = brain.calibrate_score(boring_clip, z, words_hype, 0.0, 30.0)
+        self.assertGreater(hype_score, 80)
+        self.assertLess(boring_score, 55)
 
     def test_split_filter_includes_facecam_and_cropped_gameplay(self):
         # Source 1920x1080 with left-corner facecam [20, 40, 500, 320]
@@ -57,7 +74,7 @@ class TestSplitLayoutQualityAndClickbait(unittest.TestCase):
         )
         self.assertNotIn("THANK YOU SO MUCH", meta2["title"])
         self.assertIn("#Shorts", meta2["title"])
-        self.assertIn("CarryisLive", meta2["title"])
+        self.assertIn("Grand Theft Auto VI", meta2["title"])
 
 
 if __name__ == "__main__":
